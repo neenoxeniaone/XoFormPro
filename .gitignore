@@ -1,0 +1,33 @@
+# Build output
+bin/
+obj/
+publish/
+Build/
+web/dist/
+node_modules/
+
+# IDE / local tooling
+.vs/
+.vscode/
+.idea/
+*.user
+.cmptmp2/
+.claude/settings.local.json
+
+# Secrets - real values live here, never commit them
+appsettings.Production.json
+appsettings.*.local.json
+*.pfx
+.env.local
+
+# Runtime data
+logs/
+**/wwwroot/uploads/*
+!**/wwwroot/uploads/.gitkeep
+# SPA build copied into the API by publish.ps1
+api/FormSubmissionPro.Api/wwwroot/assets/
+api/FormSubmissionPro.Api/wwwroot/index.html
+api/FormSubmissionPro.Api/wwwroot/*.js
+api/FormSubmissionPro.Api/wwwroot/*.svg
+api/FormSubmissionPro.Api/wwwroot/*.ico
+api/FormSubmissionPro.Api/wwwroot/web.config
