@@ -1,89 +1,85 @@
 # Deploying XOFormPro
 
-Production runs on IIS at the **root** of `https://xoformpro.xeniaone.com`. The ASP.NET API
-also serves the React app, so it is **one** IIS site: same origin, no CORS setup for the
-dashboard, no absolute API URL in the frontend.
+Production runs on the **k3s server `13.135.138.127`** (AWS Lightsail, eu-west-2), in its own
+namespace `xoformpro`, next to CompliVault (`cvs`) and the XeniaOne website (`website`).
+Same pattern as the website: stock container images, app files uploaded to `/srv`, HTTPS
+from the shared ingress-nginx + cert-manager (`letsencrypt-prod`). No image registry.
 
 ```
-https://xoformpro.xeniaone.com/             -> React app (index.html)
-https://xoformpro.xeniaone.com/assets/...   -> React JS/CSS (wwwroot/assets)
-https://xoformpro.xeniaone.com/forms.js     -> embed script customers include
-https://xoformpro.xeniaone.com/api/...      -> dashboard API (JWT)
-https://xoformpro.xeniaone.com/submit       -> public form endpoint
-https://xoformpro.xeniaone.com/v1/...       -> public REST API (API keys)
-https://xoformpro.xeniaone.com/form-config  -> per-key config read by forms.js
-https://xoformpro.xeniaone.com/form-token   -> signed form tokens for forms.js
-https://xoformpro.xeniaone.com/uploads/...  -> uploaded files (always served as downloads)
-https://xoformpro.xeniaone.com/health       -> health check (DB connectivity)
+xoformpro.xeniaone.com ──► ingress-nginx (TLS) ──► Service app ──► Deployment app
+                                                    (mcr.microsoft.com/dotnet/aspnet:9.0,
+                                                     files from /srv/xoformpro/app)
+                                                             │
+                                                             ▼
+                                                    StatefulSet postgres (postgres:17, 5Gi PVC)
 ```
 
-> If anything sits in front of the app (a reverse proxy, the Vite dev server, a CDN),
-> **every** backend path above needs forwarding. A missing rule returns the SPA's
-> `index.html` with a 200 rather than a 404, so a feature silently stops working.
-> `forms.js` logs a `[XoFormPro]` console warning when this happens. When adding a
-> backend path, update `web/vite.config.ts`, `web/public/web.config`, and this table.
+All files are in [`deploy/`](deploy/). SSH key: `E:\Projects\XenieoneServerKey\LightsailDefaultKey-eu-west-2.pem`
+(override with `KEY=...`; host with `HOST=...`). Run the scripts from **Git Bash** at the repo root.
 
-> The visible brand is **XOFormPro**; the code project / namespace stay `FormSubmissionPro`.
+| Script | What it does |
+|--------|--------------|
+| `bash deploy/deploy.sh` | Builds React + API, uploads to `/srv/xoformpro/app`, applies `k8s-xoformpro.yaml`, rolling-restarts the app. **The normal deploy command.** |
+| `bash deploy/create-secrets.sh` | One-time: creates the `xoformpro-secrets` secret (DB password, connection string, JWT key). Never overwrites an existing one. |
+| `bash deploy/migrate-db.sh` | Copies the old production DB (IIS server) into the cluster DB, **replacing** it. Used for the move; keeps the source dump in `/srv/xoformpro/backups`. |
 
-## Prerequisites on the host
-- **.NET 9 Hosting Bundle** (ASP.NET Core Module for IIS).
-- **PostgreSQL** reachable from the host.
+## What lives where on the server
 
-## 1. Secrets — never in git
+| Path / object | Contents |
+|---------------|----------|
+| `/srv/xoformpro/app` | Published app (replaced on every deploy) |
+| `/srv/xoformpro/uploads` | Visitor file uploads — **keep** |
+| `/srv/xoformpro/keys` | ASP.NET Data Protection keys (decrypt stored secrets) — **keep** |
+| `/srv/xoformpro/backups` | Nightly `pg_dump` (02:30 UTC, 14 days kept) + migration dumps |
+| PVC `pgdata-postgres-0` | PostgreSQL data (`local-path`) |
+| Secret `xoformpro-secrets` | `POSTGRES_PASSWORD`, `ConnectionStrings__Postgres`, `Jwt__SigningKey` |
 
-The repository is public. `appsettings.json` and `web.config` contain **no** secrets.
-Production values come from either of these (environment variables win if both are set):
+Secrets are never in git. Changing `Jwt__SigningKey` signs everyone out.
 
-**Option A — `appsettings.Production.json`** next to the published DLL (git-ignored;
-`dotnet publish` copies it from `api/FormSubmissionPro.Api/` if it exists there):
+## Day-to-day
 
-```json
-{
-  "ConnectionStrings": { "Postgres": "Host=...;Port=5432;Database=...;Username=...;Password=..." },
-  "Jwt": { "SigningKey": "<a long, stable random secret>" }
-}
+```bash
+bash deploy/deploy.sh                                   # deploy current code
+ssh -i <key> ubuntu@13.135.138.127
+kubectl -n xoformpro get pods                           # status
+kubectl -n xoformpro logs deploy/app --tail=100 -f      # app logs
+kubectl -n xoformpro exec -it postgres-0 -- psql -U xoformpro -d xoformpro   # SQL
+kubectl -n xoformpro create job --from=cronjob/postgres-backup backup-now    # backup now
 ```
 
-**Option B — environment variables** on the host / app pool (`__` = nesting):
-
+Restore a backup (replaces the database — stop the app first):
+```bash
+kubectl -n xoformpro scale deploy/app --replicas=0
+kubectl -n xoformpro exec postgres-0 -- psql -U xoformpro -d postgres -c "DROP DATABASE xoformpro WITH (FORCE)" -c "CREATE DATABASE xoformpro OWNER xoformpro"
+sudo zcat /srv/xoformpro/backups/xoformpro-<stamp>.sql.gz | kubectl -n xoformpro exec -i postgres-0 -- psql -U xoformpro -d xoformpro
+kubectl -n xoformpro scale deploy/app --replicas=1
 ```
-ConnectionStrings__Postgres = Host=...;Port=5432;Database=...;Username=...;Password=...
-Jwt__SigningKey             = <a long, stable random secret>
-```
 
-`App__BaseUrl` (used in password-reset / invite links) is set in the committed `web.config`.
+EF migrations are applied automatically when the app starts.
 
-The app **refuses to start** outside Development without `Jwt:SigningKey`. Changing the key
-signs everyone out (existing tokens stop validating) and invalidates outstanding form tokens.
+Email transport (Microsoft Graph or Amazon SES) is configured in the database: row `Id = 1`
+of `fsp_email_configurations`.
 
-Email transport (Microsoft Graph or Amazon SES) is configured in the database, row `Id = 1`
-of `fsp_email_configurations` — not in config files. With no credentials there, mail is
-only written to the log.
+Optional: `Retention__FreeDays` / `Retention__ProDays` env vars enable deletion of old
+submissions (both default `0` = keep forever).
 
-Optional: `Retention__FreeDays` / `Retention__ProDays` enable automatic deletion of old
-submissions. Both default to `0` = keep forever.
+## Routing
 
-## 2. Build + publish (one command)
-From the repo root:
-```powershell
-./publish.ps1
-```
-Builds the React app (served at root — `VITE_BASE_PATH` is empty in `web/.env.production`),
-copies it into the API's `wwwroot`, and runs `dotnet publish` into `./publish`.
-
-## 3. Deploy to IIS
-- Copy the contents of `./publish` to the site folder. **Don't delete `wwwroot/uploads`**
-  on the server — it holds customers' uploaded files.
-- App pool: **"No Managed Code"** (ASP.NET Core runs in-process via ANCM).
-- The app pool identity needs write access to `wwwroot/uploads` and `logs`.
-
-EF migrations are **applied on startup**, so the schema updates on first request after deploy.
+Every backend path is served by the app: `/api`, `/submit`, `/v1`, `/form-config`,
+`/form-token`, `/uploads`, `/health`, plus the SPA and `/forms.js`. The ingress sends
+everything to the app, so a new backend path needs no ingress change. For **local dev**
+it still needs a proxy rule in `web/vite.config.ts` — a missing rule returns `index.html`
+with a 200 instead of a 404. `forms.js` logs a `[XoFormPro]` console warning when that happens.
 
 ## Notes
-- **CORS** is open so any site can POST to `/submit`. Dashboard auth is a bearer token
-  (not a cookie), so this does not expose the dashboard API to cross-site requests.
-- **Webhooks** cannot target localhost / private / link-local addresses, and redirects are
-  not followed.
-- To host under a sub-path instead of a domain root, set `VITE_BASE_PATH=/YourPath` in
-  `web/.env.production`; under IIS as a virtual application the path base is picked up
-  automatically, otherwise set `App:PathBase`.
+- `App__TrustForwardedHeaders=true` makes the app use the client IP from the ingress
+  (`X-Forwarded-For`); without it every visitor shares one rate-limit bucket.
+- Uploads are capped at 25 MB per request by the ingress (`proxy-body-size`).
+- PostgreSQL only accepts connections from pods in the `xoformpro` namespace (NetworkPolicy).
+- The visible brand is **XOFormPro**; code project / namespace stay `FormSubmissionPro`.
+
+## Legacy: IIS
+
+The previous host was IIS on `164.52.217.36` (`./publish.ps1` → copy `./publish` to the site,
+secrets from a git-ignored `appsettings.Production.json`). `web.config`, `web/public/web.config`
+and `publish.ps1` are kept for that setup only.

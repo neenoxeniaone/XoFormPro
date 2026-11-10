@@ -105,5 +105,5 @@ web/
 
 ## Deploy
 
-See [DEPLOYMENT.md](DEPLOYMENT.md). Short version: `./publish.ps1`, copy `./publish` to the
-IIS site. Secrets come from a git-ignored `appsettings.Production.json` or environment variables.
+See [DEPLOYMENT.md](DEPLOYMENT.md). Production runs on k3s (13.135.138.127); deploy with
+`bash deploy/deploy.sh` from Git Bash. Secrets live in a Kubernetes secret, never in git.

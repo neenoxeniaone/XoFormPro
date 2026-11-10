@@ -10,6 +10,7 @@ using FormSubmissionPro.Api.Services.Retention;
 using FormSubmissionPro.Api.Services.Spam;
 using FormSubmissionPro.Api.Services.Webhooks;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.AspNetCore.DataProtection;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
 using Serilog;
@@ -120,7 +121,17 @@ builder.Services.AddSingleton<SesEmailSender>();
 builder.Services.AddSingleton<IEmailSender, EmailDispatcher>();
 
 // Pro-feature services.
-builder.Services.AddDataProtection();
+// Data Protection keys encrypt secrets at rest (SecretProtector). In a container they must
+// live on a persistent volume, or every restart generates new keys and stored secrets stop
+// decrypting. Under IIS the default (user profile / registry) location is used.
+var dataProtection = builder.Services.AddDataProtection();
+var keysPath = builder.Configuration["DataProtection:KeysPath"];
+if (!string.IsNullOrWhiteSpace(keysPath))
+{
+    // Fixed name so the keys stay valid regardless of the container's content root.
+    dataProtection.PersistKeysToFileSystem(new DirectoryInfo(keysPath))
+                  .SetApplicationName("XOFormPro");
+}
 builder.Services.AddSingleton<FormSubmissionPro.Api.Services.Security.ISecretProtector, FormSubmissionPro.Api.Services.Security.SecretProtector>();
 builder.Services.AddSingleton<ICaptchaVerifier, CaptchaVerifier>();
 builder.Services.AddScoped<IFileStorage, LocalFileStorage>();
@@ -136,6 +147,25 @@ builder.Services.AddCors(o => o.AddDefaultPolicy(p =>
     p.AllowAnyOrigin().AllowAnyHeader().AllowAnyMethod()));
 
 var app = builder.Build();
+
+// Behind a reverse proxy (the Kubernetes ingress), take the client IP and scheme from
+// X-Forwarded-For / X-Forwarded-Proto. Without this every visitor appears to come from
+// the proxy's IP, so the per-IP rate limits become one global limit, and upload URLs are
+// built as http://. Opt-in: on a host reachable directly, trusting these headers would
+// let clients spoof their IP.
+if (builder.Configuration.GetValue("App:TrustForwardedHeaders", false))
+{
+    var fwd = new ForwardedHeadersOptions
+    {
+        ForwardedHeaders = Microsoft.AspNetCore.HttpOverrides.ForwardedHeaders.XForwardedFor
+                         | Microsoft.AspNetCore.HttpOverrides.ForwardedHeaders.XForwardedProto,
+        ForwardLimit = 1,
+    };
+    // The pod is only reachable through the ingress, whose address isn't fixed.
+    fwd.KnownNetworks.Clear();
+    fwd.KnownProxies.Clear();
+    app.UseForwardedHeaders(fwd);
+}
 
 app.UseExceptionHandler();
 

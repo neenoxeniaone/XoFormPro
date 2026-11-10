@@ -31,3 +31,6 @@ api/FormSubmissionPro.Api/wwwroot/*.js
 api/FormSubmissionPro.Api/wwwroot/*.svg
 api/FormSubmissionPro.Api/wwwroot/*.ico
 api/FormSubmissionPro.Api/wwwroot/web.config
+
+# deploy/deploy.sh publish output
+deploy/.out/

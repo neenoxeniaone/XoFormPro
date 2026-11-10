@@ -1,0 +1,230 @@
+# XOFormPro on the k3s server (13.135.138.127): app + its own PostgreSQL, in namespace
+# `xoformpro`. Kept separate from CompliVault (`cvs`) and the website (`website`) so none
+# affects the others.
+#
+# Host folders (created by deploy.sh):
+#   /srv/xoformpro/app      published app (uploaded by deploy.sh), mounted read-only
+#   /srv/xoformpro/uploads  visitor file uploads            (owned by uid 1654)
+#   /srv/xoformpro/keys     ASP.NET Data Protection keys    (owned by uid 1654)
+#   /srv/xoformpro/backups  nightly pg_dump output (14 days kept)
+#
+# Secrets are NOT in this file. `xoformpro-secrets` is created by deploy/create-secrets.sh
+# with: POSTGRES_PASSWORD, ConnectionStrings__Postgres, Jwt__SigningKey.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: xoformpro
+---
+# ── PostgreSQL ────────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: xoformpro
+spec:
+  selector: { app: postgres }
+  ports:
+    - port: 5432
+      targetPort: 5432
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+  namespace: xoformpro
+  labels: { app: postgres }
+spec:
+  serviceName: postgres
+  replicas: 1
+  selector:
+    matchLabels: { app: postgres }
+  template:
+    metadata:
+      labels: { app: postgres }
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:17.6-alpine
+          ports:
+            - containerPort: 5432
+          env:
+            - { name: POSTGRES_DB, value: xoformpro }
+            - { name: POSTGRES_USER, value: xoformpro }
+            - name: POSTGRES_PASSWORD
+              valueFrom: { secretKeyRef: { name: xoformpro-secrets, key: POSTGRES_PASSWORD } }
+            - { name: PGDATA, value: /var/lib/postgresql/data/pgdata }
+          resources:
+            requests: { cpu: 50m, memory: 128Mi }
+            limits:   { cpu: "1", memory: 512Mi }
+          readinessProbe:
+            exec: { command: ["pg_isready", "-U", "xoformpro", "-d", "xoformpro"] }
+            periodSeconds: 10
+          livenessProbe:
+            exec: { command: ["pg_isready", "-U", "xoformpro", "-d", "xoformpro"] }
+            periodSeconds: 30
+            failureThreshold: 5
+          volumeMounts:
+            - name: pgdata
+              mountPath: /var/lib/postgresql/data
+  volumeClaimTemplates:
+    - metadata:
+        name: pgdata
+      spec:
+        accessModes: [ReadWriteOnce]
+        storageClassName: local-path
+        resources:
+          requests: { storage: 5Gi }
+---
+# Only pods in this namespace may talk to the database.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: postgres-same-namespace
+  namespace: xoformpro
+spec:
+  podSelector:
+    matchLabels: { app: postgres }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector: {}
+      ports:
+        - port: 5432
+---
+# Nightly logical backup to the host, 14 days kept.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: postgres-backup
+  namespace: xoformpro
+spec:
+  schedule: "30 2 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 2
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      template:
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: backup
+              image: postgres:17.6-alpine
+              env:
+                - name: PGPASSWORD
+                  valueFrom: { secretKeyRef: { name: xoformpro-secrets, key: POSTGRES_PASSWORD } }
+              command:
+                - sh
+                - -c
+                - |
+                  set -e
+                  f=/backups/xoformpro-$(date -u +%Y%m%d-%H%M%S).sql.gz
+                  pg_dump -h postgres -U xoformpro -d xoformpro --no-owner --no-privileges | gzip > "$f.tmp"
+                  mv "$f.tmp" "$f"
+                  find /backups -name 'xoformpro-*.sql.gz' -mtime +14 -delete
+                  ls -lh /backups | tail -5
+              volumeMounts:
+                - name: backups
+                  mountPath: /backups
+          volumes:
+            - name: backups
+              hostPath:
+                path: /srv/xoformpro/backups
+                type: DirectoryOrCreate
+---
+# ── App (API + dashboard SPA + forms.js) ──────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: app
+  namespace: xoformpro
+  labels: { app: xoformpro }
+spec:
+  replicas: 1   # uploads + Data Protection keys live on this node's disk
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: { maxSurge: 1, maxUnavailable: 0 }
+  selector:
+    matchLabels: { app: xoformpro }
+  template:
+    metadata:
+      labels: { app: xoformpro }
+    spec:
+      securityContext:
+        runAsUser: 1654     # the `app` user in the .NET images
+        runAsGroup: 1654
+        runAsNonRoot: true
+      containers:
+        - name: app
+          image: mcr.microsoft.com/dotnet/aspnet:9.0
+          workingDir: /app
+          command: ["dotnet", "FormSubmissionPro.Api.dll"]
+          ports:
+            - containerPort: 8080
+          env:
+            - { name: ASPNETCORE_URLS, value: "http://+:8080" }
+            - { name: ASPNETCORE_ENVIRONMENT, value: Production }
+            - { name: App__BaseUrl, value: "https://xoformpro.xeniaone.com" }
+            - { name: App__TrustForwardedHeaders, value: "true" }
+            - { name: DataProtection__KeysPath, value: /data/keys }
+            - { name: DOTNET_gcServer, value: "0" }   # small single-replica app
+          envFrom:
+            - secretRef: { name: xoformpro-secrets }  # ConnectionStrings__Postgres, Jwt__SigningKey
+          resources:
+            requests: { cpu: 50m, memory: 160Mi }
+            limits:   { cpu: "1", memory: 512Mi }
+          startupProbe:          # migrations run on startup
+            tcpSocket: { port: 8080 }
+            periodSeconds: 3
+            failureThreshold: 60
+          readinessProbe:
+            httpGet: { path: /health, port: 8080 }
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            tcpSocket: { port: 8080 }
+            periodSeconds: 30
+          volumeMounts:
+            - { name: app, mountPath: /app, readOnly: true }
+            - { name: uploads, mountPath: /app/wwwroot/uploads }
+            - { name: keys, mountPath: /data/keys }
+      volumes:
+        - name: app
+          hostPath: { path: /srv/xoformpro/app, type: Directory }
+        - name: uploads
+          hostPath: { path: /srv/xoformpro/uploads, type: Directory }
+        - name: keys
+          hostPath: { path: /srv/xoformpro/keys, type: Directory }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: app
+  namespace: xoformpro
+spec:
+  selector: { app: xoformpro }
+  ports:
+    - port: 80
+      targetPort: 8080
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: xoformpro
+  namespace: xoformpro
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    nginx.ingress.kubernetes.io/proxy-body-size: "25m"   # file uploads on /submit
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts: [xoformpro.xeniaone.com]
+      secretName: xoformpro-tls
+  rules:
+    - host: xoformpro.xeniaone.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend: { service: { name: app, port: { number: 80 } } }
