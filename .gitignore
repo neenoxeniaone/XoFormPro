@@ -34,3 +34,6 @@ api/FormSubmissionPro.Api/wwwroot/web.config
 
 # deploy/deploy.sh publish output
 deploy/.out/
+
+# Private notes with live credentials
+*.local.md
