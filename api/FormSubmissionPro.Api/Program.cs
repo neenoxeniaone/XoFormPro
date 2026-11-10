@@ -25,6 +25,14 @@ builder.Host.UseSerilog((context, config) => config
 builder.Services.AddControllers();
 builder.Services.AddOpenApi();
 builder.Services.AddHttpClient();
+// Outbound webhooks hit customer-supplied URLs: block internal targets at connect time,
+// and don't follow redirects (a public URL could otherwise bounce to an internal one).
+builder.Services.AddHttpClient(WebhookUrlGuard.HttpClientName)
+    .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler
+    {
+        ConnectCallback = WebhookUrlGuard.ConnectAsync,
+        AllowAutoRedirect = false,
+    });
 builder.Services.AddHttpContextAccessor();
 
 // ── Error handling + health checks ──
@@ -150,7 +158,23 @@ app.UseCors();
 
 // Serve the built React app (wwwroot/index.html + assets) and uploaded files.
 app.UseDefaultFiles();
-app.UseStaticFiles();
+app.UseStaticFiles(new StaticFileOptions
+{
+    OnPrepareResponse = ctx =>
+    {
+        // Uploads are visitor-supplied and served from the dashboard's own origin. An
+        // uploaded .html/.svg opened in the browser would otherwise run script as the
+        // dashboard and could read the login token. Force download, forbid MIME sniffing,
+        // and sandbox anything that does get rendered.
+        if (ctx.Context.Request.Path.StartsWithSegments("/uploads"))
+        {
+            var headers = ctx.Context.Response.Headers;
+            headers.ContentDisposition = "attachment";
+            headers.XContentTypeOptions = "nosniff";
+            headers.ContentSecurityPolicy = "default-src 'none'; sandbox";
+        }
+    },
+});
 
 app.UseRateLimiter();
 app.UseAuthentication();

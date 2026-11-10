@@ -136,7 +136,9 @@ public class SubmitController : ControllerBase
 
         // The form's configured Default subject is the email subject. A `subject` field
         // posted by the form is only a fallback (used if the form somehow has no default).
-        subject = string.IsNullOrWhiteSpace(form.DefaultSubject) ? subject : form.DefaultSubject;
+        subject = !string.IsNullOrWhiteSpace(form.DefaultSubject) ? form.DefaultSubject
+            : !string.IsNullOrWhiteSpace(subject) ? subject
+            : "New Form Submission";
 
         // Everything that isn't reserved becomes the visible payload.
         var payload = fields
@@ -184,9 +186,12 @@ public class SubmitController : ControllerBase
                 : ccEmail.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
 
             // 1) Notification email to the owner — unless disabled (e.g. for subscription lists).
+            // Email failures are logged, not thrown. The submission is already saved, so a 500
+            // here would tell the visitor it failed (inviting a duplicate resubmit) and would
+            // skip the webhook writes below.
             if (form.NotifyByEmail)
             {
-                await _email.SendAsync(new EmailMessage(
+                await TrySendAsync("notification", submission.Id, new EmailMessage(
                     To: to,
                     Subject: subject,
                     // Renderer picks a kind-aware default intro (subscriber vs submission) when none is set.
@@ -194,18 +199,18 @@ public class SubmitController : ControllerBase
                     ReplyTo: !string.IsNullOrWhiteSpace(replyTo) ? replyTo : senderEmail,
                     // Sender display name = the form's name (a posted `from_name` still overrides it).
                     FromName: string.IsNullOrWhiteSpace(fromName) ? form.Name : fromName,
-                    Cc: cc), ct);
+                    Cc: cc));
             }
 
             // 2) Autoresponder (Pro): confirmation back to the submitter.
             if (isPro && form.AutoresponderEnabled && !string.IsNullOrWhiteSpace(senderEmail))
             {
-                await _email.SendAsync(new EmailMessage(
+                await TrySendAsync("autoresponder", submission.Id, new EmailMessage(
                     To: senderEmail!,
                     Subject: string.IsNullOrWhiteSpace(form.AutoresponderSubject)
                         ? "Thanks for your submission" : form.AutoresponderSubject!,
                     HtmlBody: $"<div style=\"font-family:Arial,sans-serif\">{form.AutoresponderBody ?? "We received your message and will get back to you soon."}</div>",
-                    FromName: form.Name), ct);
+                    FromName: form.Name));
             }
 
             // 3) Webhooks (Pro): write durable outbox records; the processor delivers them.
@@ -296,6 +301,23 @@ public class SubmitController : ControllerBase
         }
 
         return result;
+    }
+
+    /// <summary>
+    /// Sends an email without letting a transport failure fail the request. Not tied to the
+    /// request's cancellation token: a visitor closing the tab must not abort the owner's mail.
+    /// </summary>
+    private async Task TrySendAsync(string kind, Guid submissionId, EmailMessage message)
+    {
+        try
+        {
+            await _email.SendAsync(message, CancellationToken.None);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to send {Kind} email for submission {Id} to {To}.",
+                kind, submissionId, message.To);
+        }
     }
 
     /// <summary>A checkbox arrives as "on" from a form post, or true/1 from JSON.</summary>

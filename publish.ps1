@@ -1,11 +1,11 @@
 # Builds the React app, embeds it into the API's wwwroot, and publishes the API.
-# Result: a single self-contained app in .\publish that serves BOTH the SPA and the API.
-# Deploy .\publish to IIS as the "FormSubmissionPro" application.
+# Result: a single app in .\publish that serves BOTH the SPA and the API.
+# Deploy .\publish to the IIS site for https://xoformpro.xeniaone.com (see DEPLOYMENT.md).
 
 $ErrorActionPreference = "Stop"
 $root = $PSScriptRoot
 
-Write-Host "1/4  Building frontend (.env.production -> base /XoFormPro)..." -ForegroundColor Cyan
+Write-Host "1/4  Building frontend (.env.production, served at site root)..." -ForegroundColor Cyan
 Push-Location "$root\web"
 npm install
 npm run build
@@ -23,5 +23,10 @@ $out = "$root\publish"
 if (Test-Path $out) { Remove-Item $out -Recurse -Force }
 dotnet publish "$root\api\FormSubmissionPro.Api\FormSubmissionPro.Api.csproj" -c Release -o $out
 
-Write-Host "4/4  Done. Deploy '$out' to IIS as the XoFormPro application." -ForegroundColor Green
-Write-Host "     Set env vars on the host: ConnectionStrings__Postgres, Jwt__SigningKey, App__BaseUrl." -ForegroundColor Yellow
+Write-Host "4/4  Done. Copy '$out' to the IIS site (keep the server's wwwroot\uploads)." -ForegroundColor Green
+if (Test-Path "$out\appsettings.Production.json") {
+    Write-Host "     Secrets: included from appsettings.Production.json (git-ignored)." -ForegroundColor Yellow
+} else {
+    Write-Host "     WARNING: no appsettings.Production.json. The host must set ConnectionStrings__Postgres" -ForegroundColor Red
+    Write-Host "     and Jwt__SigningKey as environment variables, or the app will not start." -ForegroundColor Red
+}

@@ -36,8 +36,8 @@ public class WebhooksController : ControllerBase
     public async Task<IActionResult> Create(CreateWebhookRequest req, CancellationToken ct)
     {
         if (!this.TryGetOrgId(out var orgId)) return Unauthorized();
-        if (string.IsNullOrWhiteSpace(req.Url) || !Uri.TryCreate(req.Url, UriKind.Absolute, out _))
-            return BadRequest(new { message = "A valid absolute URL is required." });
+        if (Services.Webhooks.WebhookUrlGuard.Validate(req.Url) is { } urlError)
+            return BadRequest(new { message = urlError });
 
         // Ensure the target form belongs to this tenant.
         var form = await _db.Forms.FirstOrDefaultAsync(f => f.Id == req.FormId && f.OrganizationId == orgId, ct);

@@ -64,7 +64,8 @@ public class WebhookProcessor : BackgroundService
 
         if (due.Count == 0) return;
 
-        var client = _httpFactory.CreateClient();
+        // Named client: its handler refuses private/internal targets (see WebhookUrlGuard).
+        var client = _httpFactory.CreateClient(WebhookUrlGuard.HttpClientName);
         client.Timeout = TimeSpan.FromSeconds(15);
 
         foreach (var delivery in due)
