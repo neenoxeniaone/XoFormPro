@@ -27,6 +27,14 @@ eval "$(node -e '
   console.log(`SRC_HOST=${q(kv.host)} SRC_PORT=${q(kv.port||5432)} SRC_DB=${q(kv.database)} SRC_USER=${q(kv.username)} SRC_PW=${q(kv.password)}`);
 ' "$(cygpath -w "$PROD_JSON" 2>/dev/null || echo "$PROD_JSON")")"
 
+# The move finished on 2026-11-11; the cluster DB is now the LIVE database. Re-running
+# this would replace live data with the old server's stale copy, so it needs explicit consent.
+if [ "${CONFIRM_OVERWRITE_LIVE:-}" != "yes" ]; then
+  echo "Refusing: this REPLACES the live production database with the old server's copy."
+  echo "If you really mean it:  CONFIRM_OVERWRITE_LIVE=yes bash deploy/migrate-db.sh"
+  exit 1
+fi
+
 STAMP=$(date -u +%Y%m%d-%H%M%S)
 DUMP="/srv/xoformpro/backups/migrate-source-$STAMP.sql"
 echo "==> Copying $SRC_DB@$SRC_HOST -> xoformpro (in cluster). Dump kept at $DUMP"

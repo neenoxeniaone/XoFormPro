@@ -22,7 +22,7 @@ All files are in [`deploy/`](deploy/). SSH key: `E:\Projects\XenieoneServerKey\L
 | `bash deploy/deploy.sh` | Builds React + API, uploads to `/srv/xoformpro/app`, applies `k8s-xoformpro.yaml`, rolling-restarts the app. **The normal deploy command.** |
 | `bash deploy/create-secrets.sh` | One-time: creates the `xoformpro-secrets` secret (DB password, connection string, JWT key). Never overwrites an existing one. |
 | `bash deploy/db-tunnel.sh` | Opens a tunnel to the production DB on `localhost:15433` for pgAdmin / DBeaver / psql; prints the connection details. Ctrl+C closes it. |
-| `bash deploy/migrate-db.sh` | Copies the old production DB (IIS server) into the cluster DB, **replacing** it. Used for the move; keeps the source dump in `/srv/xoformpro/backups`. |
+| `bash deploy/migrate-db.sh` | **Done 2026-11-11 — do not use.** Copied the old IIS database into the cluster, **replacing** it. Now refuses to run unless `CONFIRM_OVERWRITE_LIVE=yes`. |
 
 ## What lives where on the server
 
